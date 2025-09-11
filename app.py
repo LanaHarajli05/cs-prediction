@@ -1,4 +1,4 @@
-# app.py — CS: EDA & Forecast (PII redacted + preview at top)
+# app.py — CS: EDA & Forecast (PII redacted, no captions)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -75,6 +75,7 @@ def std_country(series: pd.Series) -> pd.Series:
     }
     return s.map(mapping).fillna(s.str.title())
 
+# Month adjustment for display: Fall→Aug 1, Spring→Jan 1 (Summer unchanged)
 def adjust_sem_month(dt: pd.Timestamp) -> pd.Timestamp:
     if pd.isna(dt): return dt
     y, m = dt.year, dt.month
@@ -89,7 +90,7 @@ def apply_sem_adjustment(df: pd.DataFrame) -> pd.DataFrame:
     df["sem_date"] = df["sem_date"].map(adjust_sem_month)
     return df
 
-# --------- load artifacts (CSVs) ----------
+# ---------- load artifacts (CSVs) ----------
 actual = read_csv_candidates(["actual_enrollments.csv", "actual_enrollments (1).csv"])
 fc     = read_csv_candidates(["forecast_prophet.csv", "forecast_prophet (1).csv",
                               "forecast_linear.csv", "forecast_linear (1).csv"])
@@ -135,59 +136,46 @@ excel_candidates = [
     "CS- All Enrolled.xlsx",
     "CS All Enrolled.xlsx",
 ]
-excel_path = existing_path(excel_candidates)
-
-@st.cache_data(show_spinner=False)
-def load_raw_excel(p: Path) -> pd.DataFrame:
+def load_raw_excel():
+    p = existing_path(excel_candidates)
     if p is None:
         return pd.DataFrame()
     try:
         try:
-            df0 = pd.read_excel(p, sheet_name="All Enrolled ")
+            return pd.read_excel(p, sheet_name="All Enrolled ")
         except Exception:
-            df0 = pd.read_excel(p, sheet_name="All Enrolled")
-        return df0
+            return pd.read_excel(p, sheet_name="All Enrolled")
     except Exception:
         return pd.DataFrame()
 
-raw_df = load_raw_excel(excel_path)
+raw_df = load_raw_excel()
 true_total = int(len(raw_df)) if not raw_df.empty else None
 
 # ---- PII redaction for preview ----
-PII_KEYWORDS = ("full name", "name", "email", "phone", "mobile", "whatsapp")
 def redact_pii(df: pd.DataFrame):
     drop_cols = []
     for c in df.columns:
         lc = c.lower()
-        # be specific: match whole word "name" or "full name"; exclude country name etc.
-        if "full" in lc and "name" in lc:
-            drop_cols.append(c)
-            continue
-        if re.fullmatch(r"\s*name\s*", lc):
-            drop_cols.append(c)
-            continue
+        # target name/email/phone variants; don't confuse with 'Country of Residence'
+        if ("full" in lc and "name" in lc) or re.fullmatch(r"\s*name\s*", lc):
+            drop_cols.append(c); continue
         if any(k in lc for k in ["email", "phone", "mobile", "whatsapp"]):
             drop_cols.append(c)
-    return df.drop(columns=drop_cols, errors="ignore"), drop_cols
+    return df.drop(columns=drop_cols, errors="ignore")
 
 # =========================
 # Tabs
 # =========================
 tab_eda, tab_enroll, tab_cor = st.tabs(["EDA", "Enrollments Forecast", "COR Forecast"])
 
-# -------- TAB 1: EDA (preview at top, PII hidden) --------
+# -------- TAB 1: EDA (preview at top, PII hidden, no captions) --------
 with tab_eda:
     st.subheader("Exploratory Data Analysis (CS)")
     if raw_df.empty:
         st.warning("Raw Excel not found in repo root. Upload the CS workbook to enable EDA.")
     else:
         # 1) Preview FIRST (PII redacted)
-        redacted_df, hidden_cols = redact_pii(raw_df.copy())
-        if hidden_cols:
-            st.caption("Hidden PII columns: " + ", ".join(hidden_cols))
-        else:
-            st.caption("No PII columns detected.")
-        st.dataframe(redacted_df.head(50), use_container_width=True)
+        st.dataframe(redact_pii(raw_df.copy()).head(50), use_container_width=True)
 
         # 2) High-level KPIs (rows/cols only)
         c1, c2 = st.columns(2)
@@ -251,7 +239,7 @@ with tab_eda:
                     .reset_index().sort_values("sem_date"))
             if not ts.empty:
                 fig_ts = px.line(ts, x="sem_date", y="enrollments",
-                                 markers=True, title="Enrollments by Cohort (Aug=Fall, Jan=Spring)")
+                                 markers=True, title="Enrollments by Cohort")
                 st.plotly_chart(fig_ts, use_container_width=True)
 
 # -------- TAB 2: Enrollments Forecast --------
@@ -274,7 +262,7 @@ with tab_enroll:
         )
         mask = (plot_df["sem_date"] >= sem_range[0]) & (plot_df["sem_date"] <= sem_range[1])
         fig = px.line(plot_df[mask], x="sem_date", y="value", color="kind", markers=True,
-                      title="Actual vs. Forecasted Enrollments (Jan=Spring, Aug=Fall)")
+                      title="Actual vs. Forecasted Enrollments")
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No data available for plotting.")
@@ -299,9 +287,8 @@ with tab_enroll:
     else:
         st.info("No future forecast rows found.")
 
-# -------- TAB 3: COR Forecast --------
+# -------- TAB 3: COR Forecast (no caption) --------
 with tab_cor:
-    st.caption("Forecasted enrollments by Country of Residence (deduplicated & standardized).")
     future_sems = sorted(cor["sem_date"].unique())
     if future_sems:
         sem_sel = st.selectbox(
@@ -314,16 +301,15 @@ with tab_cor:
         if cor_sub.empty:
             st.info("No COR data for the selected semester.")
         else:
-            fig2 = px.bar(cor_sub, x="pred_count", y="Country", orientation="h",
-                          title=f"Future COR Breakdown – {pd.to_datetime(sem_sel).strftime('%b %Y')}")
+            fig2 = px.bar(
+                cor_sub, x="pred_count", y="Country", orientation="h",
+                title=f"Future COR Breakdown – {pd.to_datetime(sem_sel).strftime('%b %Y')}"
+            )
             st.plotly_chart(fig2, use_container_width=True)
 
             tbl = (cor_sub.assign(Semester=pd.to_datetime(sem_sel).strftime("%b %Y"))
                             [["Semester","Country","pred_count"]]
                             .rename(columns={"pred_count":"Predicted Enrollments"}))
             st.dataframe(tbl, use_container_width=True, hide_index=True)
-
     else:
         st.info("No COR forecast data found.")
-
-st.caption("Notes: PII (names/emails/phones) is hidden in the preview. Fall displays in August; Spring in January.")
