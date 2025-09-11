@@ -1,18 +1,17 @@
-# app.py — CS: EDA + Forecast Dashboard (cleaned visuals & bug fixes)
+# app.py — CS: EDA & Forecast (PII redacted + preview at top)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from pathlib import Path
+import re
 
 st.set_page_config(page_title="CS – EDA & Forecast", layout="wide")
 st.title("CS – EDA & Forecast Dashboard")
 
 BASE = Path(__file__).parent
 
-# =========================
-# Helpers (files & columns)
-# =========================
+# ----------------- helpers -----------------
 def existing_path(candidates):
     for name in candidates:
         p = BASE / name
@@ -74,16 +73,14 @@ def std_country(series: pd.Series) -> pd.Series:
         "QATAR": "Qatar", "KUWAIT": "Kuwait",
         "USA": "USA", "UNITED STATES": "USA",
     }
-    out = s.map(mapping).fillna(s.str.title())
-    return out
+    return s.map(mapping).fillna(s.str.title())
 
-# Semester month adjustment: Fall→Aug 1, Spring→Jan 1 (Summer unchanged)
 def adjust_sem_month(dt: pd.Timestamp) -> pd.Timestamp:
     if pd.isna(dt): return dt
     y, m = dt.year, dt.month
-    if m == 10:  # Fall previously encoded as Oct
+    if m == 10:  # Fall encoded as Oct -> show Aug
         return pd.Timestamp(y, 8, 1)
-    if m == 3:   # Spring previously encoded as Mar
+    if m == 3:   # Spring encoded as Mar -> show Jan
         return pd.Timestamp(y, 1, 1)
     return dt
 
@@ -92,15 +89,13 @@ def apply_sem_adjustment(df: pd.DataFrame) -> pd.DataFrame:
     df["sem_date"] = df["sem_date"].map(adjust_sem_month)
     return df
 
-# =========================
-# Load artifacts (CSVs)
-# =========================
+# --------- load artifacts (CSVs) ----------
 actual = read_csv_candidates(["actual_enrollments.csv", "actual_enrollments (1).csv"])
 fc     = read_csv_candidates(["forecast_prophet.csv", "forecast_prophet (1).csv",
                               "forecast_linear.csv", "forecast_linear (1).csv"])
 cor    = read_csv_candidates(["forecast_cor.csv", "forecast_cor (1).csv"])
 
-# Standardize
+# standardize
 actual = coerce_sem_date(actual)
 actual = ensure_columns(actual, {"enrollments": ["count", "total", "Enrollments"]})
 actual = apply_sem_adjustment(actual).sort_values("sem_date")[["sem_date","enrollments"]]
@@ -128,15 +123,12 @@ if "pred_count" not in cor.columns:
         st.stop()
 cor["Country"] = std_country(cor[country_col])
 cor = apply_sem_adjustment(cor)
-# protect against non-numeric or NaN pred_count
 cor["pred_count"] = pd.to_numeric(cor["pred_count"], errors="coerce").fillna(0).astype(int)
 cor = (cor.groupby(["sem_date","Country"], as_index=False)["pred_count"]
          .sum()
          .sort_values(["sem_date","pred_count"], ascending=[True, False]))
 
-# =========================
-# Load raw Excel for EDA & true total
-# =========================
+# ---------- raw excel for EDA ----------
 excel_candidates = [
     "CS - All Enrolled.xlsx",
     "CS– All Enrolled.xlsx",
@@ -150,7 +142,6 @@ def load_raw_excel(p: Path) -> pd.DataFrame:
     if p is None:
         return pd.DataFrame()
     try:
-        # workbook sheet has a trailing space variant
         try:
             df0 = pd.read_excel(p, sheet_name="All Enrolled ")
         except Exception:
@@ -162,33 +153,53 @@ def load_raw_excel(p: Path) -> pd.DataFrame:
 raw_df = load_raw_excel(excel_path)
 true_total = int(len(raw_df)) if not raw_df.empty else None
 
+# ---- PII redaction for preview ----
+PII_KEYWORDS = ("full name", "name", "email", "phone", "mobile", "whatsapp")
+def redact_pii(df: pd.DataFrame):
+    drop_cols = []
+    for c in df.columns:
+        lc = c.lower()
+        # be specific: match whole word "name" or "full name"; exclude country name etc.
+        if "full" in lc and "name" in lc:
+            drop_cols.append(c)
+            continue
+        if re.fullmatch(r"\s*name\s*", lc):
+            drop_cols.append(c)
+            continue
+        if any(k in lc for k in ["email", "phone", "mobile", "whatsapp"]):
+            drop_cols.append(c)
+    return df.drop(columns=drop_cols, errors="ignore"), drop_cols
+
 # =========================
-# Tabs: EDA, Enrollments, COR
+# Tabs
 # =========================
 tab_eda, tab_enroll, tab_cor = st.tabs(["EDA", "Enrollments Forecast", "COR Forecast"])
 
-# -------------------------
-# TAB 1: EDA  (simplified per your requests)
-# -------------------------
+# -------- TAB 1: EDA (preview at top, PII hidden) --------
 with tab_eda:
     st.subheader("Exploratory Data Analysis (CS)")
     if raw_df.empty:
         st.warning("Raw Excel not found in repo root. Upload the CS workbook to enable EDA.")
     else:
-        # Top KPIs — only Rows & Columns (removed Missing cells / Duplicates)
+        # 1) Preview FIRST (PII redacted)
+        redacted_df, hidden_cols = redact_pii(raw_df.copy())
+        if hidden_cols:
+            st.caption("Hidden PII columns: " + ", ".join(hidden_cols))
+        else:
+            st.caption("No PII columns detected.")
+        st.dataframe(redacted_df.head(50), use_container_width=True)
+
+        # 2) High-level KPIs (rows/cols only)
         c1, c2 = st.columns(2)
         c1.metric("Rows", f"{len(raw_df):,}")
         c2.metric("Columns", f"{raw_df.shape[1]:,}")
 
-        # ---- Demographics picker (exclude 'English Test Scores') ----
-        # Build candidate list
-        def col_has(name): return any(name.lower() in c.lower() for c in raw_df.columns)
+        # 3) Demographics picker (exclude 'English Test Scores')
         demo_pool = []
         for c in raw_df.columns:
             lc = c.lower()
             if any(k in lc for k in ["gender", "age", "job", "occupation", "degree", "country", "cohort"]):
                 demo_pool.append(c)
-        # Exclude English Test columns
         demo_pool = [c for c in demo_pool if not ("english" in c.lower() and "test" in c.lower())]
 
         st.markdown("### Demographics at a Glance")
@@ -206,29 +217,19 @@ with tab_eda:
             vc = series.value_counts().head(15)
             if vc.empty:
                 continue
-
             if "gender" in col.lower():
-                fig = px.pie(
-                    names=vc.index, values=vc.values,
-                    title=f"Distribution — {col}"
-                )
+                fig = px.pie(names=vc.index, values=vc.values, title=f"Distribution — {col}")
             else:
-                fig = px.bar(
-                    vc[::-1], orientation="h",
-                    title=f"Top values — {col}"
-                )
+                fig = px.bar(vc[::-1], orientation="h", title=f"Top values — {col}")
             st.plotly_chart(fig, use_container_width=True)
 
-        # ---- Cohort timeline (map to Aug/Jan/Jul) ----
+        # 4) Cohort timeline (Aug=Fall, Jan=Spring, Jul=Summer)
         def clean_cohort_text(s):
             if pd.isna(s): return s
             s = str(s).strip()
             s = s.replace(" -", "-").replace("- ", "-")
             return s
-
         def cohort_to_date(cohort):
-            # Fall YY-YY -> Aug 1 of first year, Spring -> Jan 1 of second year, Summer -> Jul 1
-            import re
             if pd.isna(cohort): return pd.NaT
             txt = str(cohort).strip()
             m = re.match(r'^(Fall|Spring|Summer)\s+(\d{2})-(\d{2})$', txt)
@@ -253,13 +254,7 @@ with tab_eda:
                                  markers=True, title="Enrollments by Cohort (Aug=Fall, Jan=Spring)")
                 st.plotly_chart(fig_ts, use_container_width=True)
 
-        # ---- Optional: raw preview ----
-        with st.expander("Preview raw data"):
-            st.dataframe(raw_df.head(50), use_container_width=True)
-
-# -------------------------
-# TAB 2: Enrollments Forecast
-# -------------------------
+# -------- TAB 2: Enrollments Forecast --------
 with tab_enroll:
     st.metric("Actual Total Enrollments", int(true_total) if true_total else int(actual["enrollments"].sum()))
 
@@ -275,7 +270,7 @@ with tab_enroll:
             "Show range",
             options=all_sems,
             value=default_range,
-            format_func=lambda d: pd.to_datetime(d).strftime("%b %Y"),  # Jan/Spring, Aug/Fall
+            format_func=lambda d: pd.to_datetime(d).strftime("%b %Y"),
         )
         mask = (plot_df["sem_date"] >= sem_range[0]) & (plot_df["sem_date"] <= sem_range[1])
         fig = px.line(plot_df[mask], x="sem_date", y="value", color="kind", markers=True,
@@ -304,9 +299,7 @@ with tab_enroll:
     else:
         st.info("No future forecast rows found.")
 
-# -------------------------
-# TAB 3: COR Forecast
-# -------------------------
+# -------- TAB 3: COR Forecast --------
 with tab_cor:
     st.caption("Forecasted enrollments by Country of Residence (deduplicated & standardized).")
     future_sems = sorted(cor["sem_date"].unique())
@@ -329,7 +322,8 @@ with tab_cor:
                             [["Semester","Country","pred_count"]]
                             .rename(columns={"pred_count":"Predicted Enrollments"}))
             st.dataframe(tbl, use_container_width=True, hide_index=True)
+
     else:
         st.info("No COR forecast data found.")
 
-st.caption("Notes: Fall is displayed in **August**, Spring in **January**. EDA simplified: no missingness/duplicates/correlation/histograms. Gender uses a pie chart; others use horizontal bars.")
+st.caption("Notes: PII (names/emails/phones) is hidden in the preview. Fall displays in August; Spring in January.")
