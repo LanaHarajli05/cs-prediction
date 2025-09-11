@@ -1,4 +1,4 @@
-# app.py — CS: EDA + Forecast Dashboard
+# app.py — CS: EDA + Forecast Dashboard (cleaned visuals & bug fixes)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -128,6 +128,8 @@ if "pred_count" not in cor.columns:
         st.stop()
 cor["Country"] = std_country(cor[country_col])
 cor = apply_sem_adjustment(cor)
+# protect against non-numeric or NaN pred_count
+cor["pred_count"] = pd.to_numeric(cor["pred_count"], errors="coerce").fillna(0).astype(int)
 cor = (cor.groupby(["sem_date","Country"], as_index=False)["pred_count"]
          .sum()
          .sort_values(["sem_date","pred_count"], ascending=[True, False]))
@@ -148,7 +150,7 @@ def load_raw_excel(p: Path) -> pd.DataFrame:
     if p is None:
         return pd.DataFrame()
     try:
-        # workbook sheet has a known trailing space variant
+        # workbook sheet has a trailing space variant
         try:
             df0 = pd.read_excel(p, sheet_name="All Enrolled ")
         except Exception:
@@ -166,61 +168,64 @@ true_total = int(len(raw_df)) if not raw_df.empty else None
 tab_eda, tab_enroll, tab_cor = st.tabs(["EDA", "Enrollments Forecast", "COR Forecast"])
 
 # -------------------------
-# TAB 1: EDA
+# TAB 1: EDA  (simplified per your requests)
 # -------------------------
 with tab_eda:
     st.subheader("Exploratory Data Analysis (CS)")
     if raw_df.empty:
         st.warning("Raw Excel not found in repo root. Upload the CS workbook to enable EDA.")
     else:
-        # Basic overview
-        c1, c2, c3, c4 = st.columns(4)
+        # Top KPIs — only Rows & Columns (removed Missing cells / Duplicates)
+        c1, c2 = st.columns(2)
         c1.metric("Rows", f"{len(raw_df):,}")
         c2.metric("Columns", f"{raw_df.shape[1]:,}")
-        c3.metric("Missing cells", f"{int(raw_df.isna().sum().sum()):,}")
-        dup_guess_col = next((c for c in ["Email Address", "Email", "NAME", "Full Name"] if c in raw_df.columns), None)
-        dups = raw_df.duplicated(subset=[dup_guess_col]).sum() if dup_guess_col else raw_df.duplicated().sum()
-        c4.metric("Duplicate rows", f"{int(dups):,}")
 
-        with st.expander("Columns & Types"):
-            info_df = pd.DataFrame({
-                "column": raw_df.columns,
-                "dtype": [str(t) for t in raw_df.dtypes.values],
-                "missing_%": (raw_df.isna().mean() * 100).round(1),
-                "unique": [raw_df[c].nunique(dropna=True) for c in raw_df.columns]
-            }).sort_values("missing_%", ascending=False)
-            st.dataframe(info_df, use_container_width=True)
-
-        # Guess demographics-like columns
-        demo_candidates = {
-            "Gender": [c for c in raw_df.columns if "gender" in c.lower()],
-            "Age": [c for c in raw_df.columns if c.lower() in ["age","age "] or "age(" in c.lower()],
-            "Employment": [c for c in raw_df.columns if any(k in c.lower() for k in ["employment", "job", "work", "occupation"])],
-            "Education": [c for c in raw_df.columns if any(k in c.lower() for k in ["education", "degree", "major"])],
-            "Country of Residence": [c for c in raw_df.columns if "country" in c.lower() or "cor" in c.lower()],
-            "Cohort": [c for c in raw_df.columns if "cohort" in c.lower()],
-        }
+        # ---- Demographics picker (exclude 'English Test Scores') ----
+        # Build candidate list
+        def col_has(name): return any(name.lower() in c.lower() for c in raw_df.columns)
+        demo_pool = []
+        for c in raw_df.columns:
+            lc = c.lower()
+            if any(k in lc for k in ["gender", "age", "job", "occupation", "degree", "country", "cohort"]):
+                demo_pool.append(c)
+        # Exclude English Test columns
+        demo_pool = [c for c in demo_pool if not ("english" in c.lower() and "test" in c.lower())]
 
         st.markdown("### Demographics at a Glance")
+        default_demo = [c for c in demo_pool if any(k in c.lower() for k in ["gender","age","job","degree","country"])][:5]
         demo_cols = st.multiselect(
             "Pick demographic columns to summarize",
-            sorted(set(sum(demo_candidates.values(), []))),
-            default=[x for x in sum(demo_candidates.values(), []) if x][:4]
+            sorted(set(demo_pool)),
+            default=default_demo
         )
 
-        if demo_cols:
-            for col in demo_cols:
-                vc = (raw_df[col].astype(str).str.strip()
-                      .replace({"nan": np.nan}).dropna()).value_counts().head(15)
-                fig = px.bar(vc[::-1], orientation="h", title=f"Top values — {col}")
-                st.plotly_chart(fig, use_container_width=True)
+        # Render: Gender as pie; others as horizontal bars
+        for col in demo_cols:
+            series = raw_df[col].astype(str).str.strip()
+            series = series.replace({"nan": np.nan}).dropna()
+            vc = series.value_counts().head(15)
+            if vc.empty:
+                continue
 
-        # Cohort timeline (map to Aug/Jan/Jul for Fall/Spring/Summer if present)
+            if "gender" in col.lower():
+                fig = px.pie(
+                    names=vc.index, values=vc.values,
+                    title=f"Distribution — {col}"
+                )
+            else:
+                fig = px.bar(
+                    vc[::-1], orientation="h",
+                    title=f"Top values — {col}"
+                )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # ---- Cohort timeline (map to Aug/Jan/Jul) ----
         def clean_cohort_text(s):
             if pd.isna(s): return s
             s = str(s).strip()
             s = s.replace(" -", "-").replace("- ", "-")
             return s
+
         def cohort_to_date(cohort):
             # Fall YY-YY -> Aug 1 of first year, Spring -> Jan 1 of second year, Summer -> Jul 1
             import re
@@ -235,7 +240,7 @@ with tab_eda:
             if season == "Summer": return pd.Timestamp(y2, 7, 1)
             return pd.NaT
 
-        coh_col = demo_candidates["Cohort"][0] if demo_candidates["Cohort"] else None
+        coh_col = next((c for c in raw_df.columns if "cohort" in c.lower()), None)
         if coh_col:
             tmp = raw_df.copy()
             tmp["Cohort_clean"] = tmp[coh_col].map(clean_cohort_text)
@@ -248,32 +253,7 @@ with tab_eda:
                                  markers=True, title="Enrollments by Cohort (Aug=Fall, Jan=Spring)")
                 st.plotly_chart(fig_ts, use_container_width=True)
 
-        # Correlation matrix for numeric columns
-        st.markdown("### Correlation Matrix (Numeric Columns)")
-        num_cols = raw_df.select_dtypes(include=[np.number]).columns.tolist()
-        if num_cols:
-            corr = raw_df[num_cols].corr()
-            fig_corr = px.imshow(corr, text_auto=True, aspect="auto", title="Correlation (Pearson)")
-            st.plotly_chart(fig_corr, use_container_width=True)
-        else:
-            st.info("No numeric columns detected for correlation.")
-
-        # Histograms / scatter matrix
-        st.markdown("### Distributions")
-        sel_num = st.multiselect("Numeric columns to visualize (histograms)",
-                                 num_cols, default=num_cols[: min(4, len(num_cols))])
-        for col in sel_num:
-            fig_h = px.histogram(raw_df, x=col, nbins=30, title=f"Histogram — {col}")
-            st.plotly_chart(fig_h, use_container_width=True)
-
-        # Missingness
-        st.markdown("### Missingness by Column")
-        miss = raw_df.isna().mean().sort_values(ascending=False) * 100
-        miss_df = miss.round(1).rename("missing_%").reset_index(names="column")
-        fig_miss = px.bar(miss_df.head(25), x="missing_%", y="column", orientation="h",
-                          title="Top 25 Columns by Missing %")
-        st.plotly_chart(fig_miss, use_container_width=True)
-
+        # ---- Optional: raw preview ----
         with st.expander("Preview raw data"):
             st.dataframe(raw_df.head(50), use_container_width=True)
 
@@ -338,15 +318,18 @@ with tab_cor:
         )
         cor_sub = cor[cor["sem_date"] == sem_sel].sort_values("pred_count", ascending=False)
 
-        fig2 = px.bar(cor_sub, x="pred_count", y="Country", orientation="h",
-                      title=f"Future COR Breakdown – {pd.to_datetime(sem_sel).strftime('%b %Y')}")
-        st.plotly_chart(fig2, use_container_width=True)
+        if cor_sub.empty:
+            st.info("No COR data for the selected semester.")
+        else:
+            fig2 = px.bar(cor_sub, x="pred_count", y="Country", orientation="h",
+                          title=f"Future COR Breakdown – {pd.to_datetime(sem_sel).strftime('%b %Y')}")
+            st.plotly_chart(fig2, use_container_width=True)
 
-        tbl = (cor_sub.assign(Semester=pd.to_datetime(sem_sel).strftime("%b %Y"))
-                        [["Semester","Country","pred_count"]]
-                        .rename(columns={"pred_count":"Predicted Enrollments"}))
-        st.dataframe(tbl, use_container_width=True, hide_index=True)
+            tbl = (cor_sub.assign(Semester=pd.to_datetime(sem_sel).strftime("%b %Y"))
+                            [["Semester","Country","pred_count"]]
+                            .rename(columns={"pred_count":"Predicted Enrollments"}))
+            st.dataframe(tbl, use_container_width=True, hide_index=True)
     else:
         st.info("No COR forecast data found.")
 
-st.caption("Notes: Fall is displayed in **August**, Spring in **January**. EDA reads the raw Excel file; forecasts use precomputed CSVs.")
+st.caption("Notes: Fall is displayed in **August**, Spring in **January**. EDA simplified: no missingness/duplicates/correlation/histograms. Gender uses a pie chart; others use horizontal bars.")
