@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.io as pio
 from pathlib import Path
 import re
 
@@ -10,6 +11,40 @@ st.set_page_config(page_title="CS – EDA & Forecast", layout="wide")
 st.title("CS – EDA & Forecast Dashboard")
 
 BASE = Path(__file__).parent
+
+# ---------------------- BRAND THEME --------------------------
+PRIMARY = "#268b8b"   # teal
+ACCENT  = "#f3c417"   # sunflower
+PURPLE  = "#87189D"   # purple
+TEXT    = "#1C1C1C"
+LIGHTBG = "#FFFFFF"
+SECBG   = "#F8F8F8"
+
+# Plotly template (consistent colors)
+pio.templates["hub"] = pio.templates["plotly_white"]
+pio.templates["hub"].layout.update(
+    colorway=[PRIMARY, ACCENT, PURPLE, "#8D99AE", "#6c757d"],
+    paper_bgcolor=LIGHTBG,
+    plot_bgcolor=LIGHTBG,
+    font=dict(color=TEXT, family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial")
+)
+pio.templates.default = "hub"
+
+# Light CSS polish
+st.markdown(f"""
+<style>
+.block-container {{max-width: 1180px; padding-top: 1rem; padding-bottom: 2rem;}}
+h1, h2, h3 {{letter-spacing:.2px;}}
+div[data-testid="stMetric"] {{
+  border: 1px solid #eaeaea; background:{SECBG}; padding:14px; border-radius:14px;
+}}
+.stButton>button {{
+  border-radius:10px; padding:8px 14px; font-weight:600; background:{PRIMARY}; color:white; border:0;
+}}
+.stButton>button:hover {{ filter: brightness(0.95); }}
+hr {{margin: 1rem 0 1.2rem 0;}}
+</style>
+""", unsafe_allow_html=True)
 
 # ----------------- helpers -----------------
 def existing_path(candidates):
@@ -168,79 +203,37 @@ def redact_pii(df: pd.DataFrame):
 # =========================
 tab_eda, tab_enroll, tab_cor = st.tabs(["EDA", "Enrollments Forecast", "COR Forecast"])
 
-# -------- TAB 1: EDA (preview at top, PII hidden, no captions) --------
+# -------- TAB 1: EDA (snapshot + total actual enrollments curve only) --------
 with tab_eda:
     st.subheader("Exploratory Data Analysis (CS)")
+
+    # 1) Snapshot table (PII redacted)
     if raw_df.empty:
         st.warning("Raw Excel not found in repo root. Upload the CS workbook to enable EDA.")
     else:
-        # 1) Preview FIRST (PII redacted)
         st.dataframe(redact_pii(raw_df.copy()).head(50), use_container_width=True)
 
-        # 2) High-level KPIs (rows/cols only)
+        # 2) KPIs (rows/cols only)
         c1, c2 = st.columns(2)
         c1.metric("Rows", f"{len(raw_df):,}")
         c2.metric("Columns", f"{raw_df.shape[1]:,}")
 
-        # 3) Demographics picker (exclude 'English Test Scores')
-        demo_pool = []
-        for c in raw_df.columns:
-            lc = c.lower()
-            if any(k in lc for k in ["gender", "age", "job", "occupation", "degree", "country", "cohort"]):
-                demo_pool.append(c)
-        demo_pool = [c for c in demo_pool if not ("english" in c.lower() and "test" in c.lower())]
+    st.divider()
 
-        st.markdown("### Demographics at a Glance")
-        default_demo = [c for c in demo_pool if any(k in c.lower() for k in ["gender","age","job","degree","country"])][:5]
-        demo_cols = st.multiselect(
-            "Pick demographic columns to summarize",
-            sorted(set(demo_pool)),
-            default=default_demo
+    # 3) Total actual enrollments over time (single teal line)
+    st.subheader("Total enrollments over time")
+    if actual is not None and not actual.empty:
+        dfa = actual.sort_values("sem_date").copy()
+        fig2 = px.line(dfa, x="sem_date", y="enrollments", markers=True, title=None)
+        fig2.update_layout(
+            xaxis_title="Semester",
+            yaxis_title="Enrollments",
+            legend_title=None,
+            margin=dict(l=10, r=10, t=10, b=10),
         )
-
-        # Render: Gender as pie; others as horizontal bars
-        for col in demo_cols:
-            series = raw_df[col].astype(str).str.strip()
-            series = series.replace({"nan": np.nan}).dropna()
-            vc = series.value_counts().head(15)
-            if vc.empty:
-                continue
-            if "gender" in col.lower():
-                fig = px.pie(names=vc.index, values=vc.values, title=f"Distribution — {col}")
-            else:
-                fig = px.bar(vc[::-1], orientation="h", title=f"Top values — {col}")
-            st.plotly_chart(fig, use_container_width=True)
-
-        # 4) Cohort timeline (Aug=Fall, Jan=Spring, Jul=Summer)
-        def clean_cohort_text(s):
-            if pd.isna(s): return s
-            s = str(s).strip()
-            s = s.replace(" -", "-").replace("- ", "-")
-            return s
-        def cohort_to_date(cohort):
-            if pd.isna(cohort): return pd.NaT
-            txt = str(cohort).strip()
-            m = re.match(r'^(Fall|Spring|Summer)\s+(\d{2})-(\d{2})$', txt)
-            if not m: return pd.NaT
-            season, y1, y2 = m.groups()
-            y1, y2 = 2000 + int(y1), 2000 + int(y2)
-            if season == "Fall":   return pd.Timestamp(y1, 8, 1)
-            if season == "Spring": return pd.Timestamp(y2, 1, 1)
-            if season == "Summer": return pd.Timestamp(y2, 7, 1)
-            return pd.NaT
-
-        coh_col = next((c for c in raw_df.columns if "cohort" in c.lower()), None)
-        if coh_col:
-            tmp = raw_df.copy()
-            tmp["Cohort_clean"] = tmp[coh_col].map(clean_cohort_text)
-            tmp["sem_date"] = tmp["Cohort_clean"].map(cohort_to_date)
-            ts = (tmp.dropna(subset=["sem_date"])
-                    .groupby("sem_date").size().rename("enrollments")
-                    .reset_index().sort_values("sem_date"))
-            if not ts.empty:
-                fig_ts = px.line(ts, x="sem_date", y="enrollments",
-                                 markers=True, title="Enrollments by Cohort")
-                st.plotly_chart(fig_ts, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("`actual_enrollments.csv` not found or empty — cannot draw the timeline.")
 
 # -------- TAB 2: Enrollments Forecast --------
 with tab_enroll:
@@ -267,8 +260,10 @@ with tab_enroll:
     else:
         st.info("No data available for plotting.")
 
+    # (fixed newline / scope)
     last_actual = actual["sem_date"].max() if not actual.empty else None
     future_only = fc[fc["sem_date"] > last_actual] if last_actual is not None else fc.copy()
+
     if not future_only.empty:
         target_sem = st.selectbox(
             "Target semester",
